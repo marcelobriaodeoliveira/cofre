@@ -74,6 +74,15 @@
   .gen input[type=checkbox], .gen input[type=number] { width: auto; }
   .gen input[type=number] { width: 64px; padding: 4px 6px; }
   .note { font-size: 13px; color: var(--muted); }
+  .prev { border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin-top: 10px; }
+  .prev.aviso { border-color: var(--danger); }
+  .prev .cab { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+  .prev .cab input { width: auto; }
+  .prev .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
+  .prev .grid input, .prev .grid textarea { padding: 7px 9px; font-size: 14px; }
+  .prev .grid .full { grid-column: 1 / -1; }
+  .prev textarea { min-height: 40px; }
+  @media (max-width: 560px) { .prev .grid { grid-template-columns: 1fr; } }
   @media (max-width: 560px) {
     .wrap { padding-top: 16px; }
     input, textarea { font-size: 16px; }
@@ -126,6 +135,7 @@
     <div class="toolbar menu">
       <button id="btnExportar">⬇ Fazer backup</button>
       <button id="btnImportar">⬆ Restaurar backup</button>
+      <button id="btnImportTexto">📋 Importar texto</button>
       <button id="btnTrocarMestra">Trocar senha mestra</button>
       <button id="btnTrancar">🔒 Trancar</button>
     </div>
@@ -175,6 +185,23 @@
         <button id="btnCancelarMestra">Cancelar</button>
       </div>
       <div class="msg" id="msgMestra"></div>
+    </div>
+
+    <!-- importar texto (Keep, bloco de notas etc.) -->
+    <div id="formImport" class="card hidden">
+      <h2 style="margin-top:0;font-size:18px">Importar senhas de texto</h2>
+      <p class="note">Copie o texto da nota (Keep, bloco de notas...) e cole abaixo. Separe cada conta com uma <b>linha em branco</b>.
+      O app reconhece linhas como <i>usuário:</i>, <i>login:</i>, <i>e-mail:</i>, <i>senha:</i>, <i>site:</i>. Você confere tudo antes de salvar.</p>
+      <textarea id="txtImport" style="min-height:160px" placeholder="Exemplo:&#10;&#10;Banco do Brasil&#10;usuário: 12345-6&#10;senha: abc123&#10;&#10;Netflix&#10;email: eu@gmail.com&#10;senha: xyz789"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="btnAnalisar">Analisar texto</button>
+        <button id="btnCancelarImport">Cancelar</button>
+      </div>
+      <div id="prevImport"></div>
+      <div class="row hidden" id="barraImport" style="margin-top:12px">
+        <button class="primary" id="btnConfirmarImport">Importar selecionadas</button>
+      </div>
+      <div class="msg" id="msgImport"></div>
     </div>
 
     <div id="lista"></div>
@@ -371,7 +398,7 @@
   });
 
   // ---------- Formulário ----------
-  function fecharForms() { $("form").classList.add("hidden"); $("formMestra").classList.add("hidden"); editandoId = null; }
+  function fecharForms() { ["form", "formMestra", "formImport"].forEach(id => $(id).classList.add("hidden")); editandoId = null; }
 
   function abrirForm(item) {
     fecharForms();
@@ -484,6 +511,115 @@
       await salvarCofre(); abrirCofre(); toast("Backup restaurado");
     }
   });
+
+
+  // ---------- Importar de texto ----------
+  const norm = (t) => t.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+  const ROT_USUARIO = /^(usuario|user|username|login|e-?mail|cpf|conta|id|matricula)$/;
+  const ROT_SENHA = /^(senha|password|pass|pwd|pw|pin|codigo|chave)(\s*\d)?$/;
+  const ROT_SITE = /^(site|url|link|endereco|app)$/;
+  const ROT_NOME = /^(nome|titulo|servico)$/;
+  const EH_URL = /^(https?:\/\/|www\.)\S+$/i;
+  const EH_EMAIL = /^\S+@\S+\.\S+$/;
+
+  function rotulo(linha) {
+    if (EH_URL.test(linha)) return null;
+    const m = linha.match(/^([^:=]{1,30}?)\s*[:=]\s*(.*)$/);
+    return m ? { rot: norm(m[1]), rotOriginal: m[1].trim(), valor: m[2].trim() } : null;
+  }
+  const conhecido = (r) => ROT_USUARIO.test(r) || ROT_SENHA.test(r) || ROT_SITE.test(r) || ROT_NOME.test(r);
+
+  function analisarBloco(linhas) {
+    const r = { nome: "", usuario: "", senha: "", site: "", notas: [] };
+    const soltas = [];
+    for (const l of linhas) {
+      const lb = rotulo(l);
+      if (lb && lb.valor && conhecido(lb.rot)) {
+        if (ROT_USUARIO.test(lb.rot) && !r.usuario) r.usuario = lb.valor;
+        else if (ROT_SENHA.test(lb.rot) && !r.senha) r.senha = lb.valor;
+        else if (ROT_SITE.test(lb.rot) && !r.site) r.site = lb.valor;
+        else if (ROT_NOME.test(lb.rot) && !r.nome) r.nome = lb.valor;
+        else r.notas.push(l);
+      } else if (EH_URL.test(l) && !r.site) r.site = l;
+      else soltas.push(l);
+    }
+    // linha única "Netflix: abc123" ou "Netflix - eu@x.com - abc123"
+    if (linhas.length === 1 && !r.senha) {
+      const lb = rotulo(linhas[0]);
+      const partes = linhas[0].split(/\s+[-|;]\s+/);
+      if (lb && lb.valor && !conhecido(lb.rot)) { r.nome = lb.rotOriginal; r.senha = lb.valor; soltas.length = 0; }
+      else if (partes.length === 2) { [r.nome, r.senha] = partes; soltas.length = 0; }
+      else if (partes.length === 3) { [r.nome, r.usuario, r.senha] = partes; soltas.length = 0; }
+    }
+    if (!r.nome && soltas.length) r.nome = soltas.shift();
+    // linhas sem rótulo: tenta deduzir usuário e senha
+    if (!r.usuario && soltas.length && (EH_EMAIL.test(soltas[0]) || (soltas.length >= 2 && !r.senha))) r.usuario = soltas.shift();
+    if (!r.senha && soltas.length === 1) r.senha = soltas.shift();
+    r.notas = r.notas.concat(soltas).join("\n");
+    if (!r.nome) r.nome = r.site ? r.site.replace(/^https?:\/\/(www\.)?/i, "").split("/")[0] : "Importado";
+    return r;
+  }
+
+  function analisarTexto(txt) {
+    const blocos = txt.replace(/\r/g, "").split(/\n\s*\n/)
+      .map(b => b.split("\n").map(l => l.replace(/^[\s•\-*▪●☐☑✓]+/, "").trim()).filter(Boolean))
+      .filter(b => b.length);
+    const res = [];
+    for (const b of blocos) {
+      // lista do tipo "Netflix: abc" uma por linha, sem linhas em branco entre elas
+      const simples = (l) => { const lb = rotulo(l); const n = l.split(/\s+[-|;]\s+/).length;
+        return (lb && lb.valor && !conhecido(lb.rot)) || ((!lb || !conhecido(lb.rot)) && (n === 2 || n === 3)); };
+      const todasSimples = b.length > 1 && b.every(simples);
+      if (todasSimples) b.forEach(l => res.push(analisarBloco([l])));
+      else res.push(analisarBloco(b));
+    }
+    return res;
+  }
+
+  let candidatos = [];
+  $("btnImportTexto").onclick = () => {
+    fecharForms(); $("txtImport").value = ""; $("prevImport").innerHTML = "";
+    $("barraImport").classList.add("hidden"); msg("msgImport", "");
+    $("formImport").classList.remove("hidden"); window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  $("btnCancelarImport").onclick = () => { candidatos = []; $("txtImport").value = ""; fecharForms(); };
+
+  $("btnAnalisar").onclick = () => {
+    candidatos = analisarTexto($("txtImport").value);
+    if (!candidatos.length) { $("prevImport").innerHTML = ""; $("barraImport").classList.add("hidden"); return msg("msgImport", "Cole algum texto primeiro."); }
+    const semSenha = candidatos.filter(c => !c.senha).length;
+    $("prevImport").innerHTML = `<p class="note" style="margin:12px 0 0">Encontrei <b>${candidatos.length}</b> conta(s). Confira e corrija os campos.
+      ${semSenha ? `<br><span style="color:var(--danger)">${semSenha} sem senha identificada (desmarcadas) — preencha ou deixe de fora.</span>` : ""}</p>` +
+      candidatos.map((c, i) => `
+      <div class="prev${c.senha ? "" : " aviso"}" data-i="${i}">
+        <label class="cab"><input type="checkbox" data-f="ok" ${c.senha ? "checked" : ""}> Importar</label>
+        <div class="grid">
+          <div><small class="note">Nome</small><input data-f="nome" placeholder="Nome" value="${esc(c.nome)}"></div>
+          <div><small class="note">Usuário</small><input data-f="usuario" placeholder="Usuário" value="${esc(c.usuario)}"></div>
+          <div><small class="note">Senha</small><input data-f="senha" placeholder="Senha" value="${esc(c.senha)}"></div>
+          <div><small class="note">Site</small><input data-f="site" placeholder="Site" value="${esc(c.site)}"></div>
+          <div class="full"><small class="note">Observações</small><textarea data-f="notas" placeholder="Observações">${esc(c.notas)}</textarea></div>
+        </div>
+      </div>`).join("");
+    $("barraImport").classList.remove("hidden"); msg("msgImport", "");
+  };
+
+  $("btnConfirmarImport").onclick = async () => {
+    const agora = new Date().toISOString(); let n = 0, pulados = 0;
+    document.querySelectorAll("#prevImport .prev").forEach(div => {
+      const v = (f) => div.querySelector(`[data-f=${f}]`);
+      if (!v("ok").checked) return;
+      const d = { nome: v("nome").value.trim(), usuario: v("usuario").value.trim(), senha: v("senha").value,
+                  site: v("site").value.trim(), notas: v("notas").value.trim() };
+      if (!d.nome || !d.senha) { pulados++; return; }
+      itens.push({ id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random(), ...d, criado: agora, alterado: agora });
+      n++;
+    });
+    if (!n) return msg("msgImport", "Nenhuma conta selecionada com nome e senha preenchidos.");
+    await salvarCofre();
+    candidatos = []; $("txtImport").value = ""; fecharForms(); renderizar();
+    toast(`${n} senha(s) importada(s)` + (pulados ? ` · ${pulados} ignorada(s) sem nome/senha` : ""));
+  };
 
   // No celular: tranca se o app ficar em segundo plano por mais de 60 s
   let saiuEm = 0;
